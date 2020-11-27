@@ -1,0 +1,2 @@
+1¡¢This sample can only be compiled on linux side
+2¡¢Please ensure that the linux side memory is not less than 100MB

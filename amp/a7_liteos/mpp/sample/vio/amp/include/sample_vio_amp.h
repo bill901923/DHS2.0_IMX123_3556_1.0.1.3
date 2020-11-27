@@ -1,0 +1,35 @@
+#ifndef __SAMPLE_VIO_AMP_H__
+#define __SAMPLE_VIO_AMP_H__
+
+#ifdef __cplusplus
+#if __cplusplus
+extern "C" {
+#endif
+#endif /* End of #ifdef __cplusplus */
+
+typedef enum hiSAMPLE_VI_CMD_E
+{
+    SAMPLE_VI_CMD_START_VI_ONLINE_VPSS_ONLINE = 0,
+    SAMPLE_VI_CMD_STOP_VI_ONLINE_VPSS_ONLINE,
+    SAMPLE_VI_CMD_START_VI_ONLINE_VPSS_OFFLINE,
+    SAMPLE_VI_CMD_STOP_VI_ONLINE_VPSS_OFFLINE,
+    SAMPLE_VI_CMD_START_VI_DOUBLE_PIPE,
+    SAMPLE_VI_CMD_STOP_VI_DOUBLE_PIPE,
+    SAMPLE_VI_CMD_SET_LDC_ATTR,
+    SAMPLE_VI_CMD_SET_DIS_ATTR,
+    SAMPLE_VI_CMD_SET_SPREAD_ATTR,
+    SAMPLE_VI_CMD_START_VI_WDR_SWITCH,
+    SAMPLE_VI_CMD_LINEAR_SWITCH_WDR,
+    SAMPLE_VI_CMD_WDR_SWITCH_LINEAR,
+    SAMPLE_VI_CMD_STOP_VI_WDR_SWITCH,
+
+    SAMPLE_VI_CMD_BUTT,
+} SAMPLE_VI_CMD_E;
+
+#ifdef __cplusplus
+#if __cplusplus
+}
+#endif
+#endif /* End of #ifdef __cplusplus */
+
+#endif /* End of #ifndef __SAMPLE_VIO_AMP_H__*/
