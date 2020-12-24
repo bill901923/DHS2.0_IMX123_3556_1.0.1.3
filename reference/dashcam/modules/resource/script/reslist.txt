@@ -1,0 +1,5 @@
+purpose:1 path:./bootlogo.yuv
+purpose:2 path:./bootsound.pcm
+purpose:3 path:./HZK16
+purpose:4 path:./osdlogo_160.bin
+purpose:5 path:./osdlogo_86.bin

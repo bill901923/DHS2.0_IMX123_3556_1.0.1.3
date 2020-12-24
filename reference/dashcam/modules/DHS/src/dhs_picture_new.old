@@ -1,0 +1,532 @@
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <stdio.h>
+#include <time.h>
+#include "hi_common.h"
+#include "hi_comm_video.h"
+#include "hi_comm_sys.h"
+#include "mpi_sys.h"
+#include "hi_comm_vb.h"
+#include "mpi_vb.h"
+#include "hi_comm_vpss.h"
+#include "mpi_vpss.h"
+#include "mpi_vgs.h"
+#include "jpeglib.h"
+#include "jerror.h"
+#include "jconfig.h"
+#include "turbojpeg.h"
+#include "jmorecfg.h"
+#include "jerror.h"
+#include "jconfig.h"
+#include <dhs_picture.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+typedef struct hiDUMP_MEMBUF_S
+{
+    VB_BLK hBlock;
+    VB_POOL hPool;
+    HI_U32 u32PoolId;
+
+    HI_U32 u32PhyAddr;
+    HI_U8 *pVirAddr;
+    HI_S32 s32Mdev;
+} DUMP_MEMBUF_S;
+
+static VPSS_GRP Grp = 0;
+static VPSS_CHN Chn = 0;
+static HI_U32 u32FrameCnt = 1;
+
+static HI_U32 u32VpssDepthFlag = 0;
+
+static HI_U32 u32OrigDepth = 0;
+
+#define MAX_FRM_CNT 1024
+static VIDEO_FRAME_INFO_S stFrame;
+static VIDEO_FRAME_INFO_S astFrame[MAX_FRM_CNT];
+
+static VB_POOL hPool = VB_INVALID_POOLID;
+static DUMP_MEMBUF_S stMem = {0};
+static VGS_HANDLE hHandle = -1;
+static HI_U32 u32BlkSize = 0;
+
+static HI_CHAR *pUserPageAddr[2] = {HI_NULL, HI_NULL};
+static HI_U32 u32Size = 0;
+/*width:图像宽度
+
+ height:图像高度
+
+ yuv_size:yuv大小,等于width*height*3/2
+
+ quality:转换后的图像质量(1~100)
+
+ subsample:*/
+
+static int tyuv2jpeg(unsigned char *yuv_buffer, int yuv_size, int width, int height,
+                     int subsample, unsigned char **jpeg_buffer, unsigned long *jpeg_size,
+                     int quality)
+{
+    tjhandle handle = NULL;
+    int flags = 0;
+    int padding = 1; //must be 1 or 4
+    int need_size = 0;
+    int ret = 0;
+
+    handle = tjInitCompress();
+
+    flags |= 0;
+
+    need_size = tjBufSizeYUV2(width, padding, height, subsample);
+    if (need_size != yuv_size)
+    {
+        printf("we detect yuv size: %d, but you give: %d, check again.\n",
+               need_size, yuv_size);
+        return 0;
+    }
+
+    ret = tjCompressFromYUV(handle, yuv_buffer, width, padding, height,
+                            subsample, jpeg_buffer, jpeg_size, quality, flags);
+    if (ret < 0)
+    {
+        printf("compress to jpeg failed: %s\n", tjGetErrorStr());
+    }
+
+    tjDestroy(handle);
+
+    return ret;
+}
+
+//NV21->YUV420P
+static void yuv420sp_to_yuv420p(unsigned char *yuv420sp, unsigned char *yuv420p,
+                                int width, int height)
+{
+    int i, j;
+    int y_size = width * height;
+
+    unsigned char *y = yuv420sp;
+    unsigned char *uv = yuv420sp + y_size;
+
+    unsigned char *y_tmp = yuv420p;
+    unsigned char *u_tmp = yuv420p + y_size;
+    unsigned char *v_tmp = yuv420p + y_size * 5 / 4;
+
+    // y
+    memcpy(y_tmp, y, y_size);
+
+    // u
+    for (j = 0, i = 0; j < y_size / 2; j += 2, i++)
+    {
+        v_tmp[i] = uv[j];
+        u_tmp[i] = uv[j + 1];
+    }
+}
+
+/*startX,startY:裁剪的起始点
+
+ normal_width,normal_height:未裁剪前的尺寸
+
+ tailor_width,tailor_height:裁剪后的尺寸
+
+ 原理：先保存Y分量，再保存uv分量，根据起始点和尺寸进行裁剪。*/
+static int tailor_yuv(unsigned char *srcframe, unsigned char *dstframe, int startX,
+                      int startY, int normal_width, int normal_height, int tailor_width,
+                      int tailor_height)
+{
+    if (!srcframe || !dstframe)
+        return -1;
+    int i = 0;
+    int j = 0;
+    int k = 0;
+    if (startX % 2 != 0)
+        startX++;
+    if (startY % 2 != 0)
+        startY++;
+    unsigned char *tmpY = (unsigned char *)malloc(
+        tailor_width * tailor_height);
+    unsigned char *tmpUV = (unsigned char *)malloc(
+        tailor_width * tailor_height / 2);
+    if (!tmpY || !tmpUV)
+        return -1;
+    for (i = startY; i < startY + tailor_height; i++)
+    {
+        //copy Y
+        memcpy(tmpY + j * tailor_width, srcframe + i * normal_width + startX,
+               tailor_width);
+        j++; //current height num
+    }
+    for (i = startY / 2; i < (startY + tailor_height) / 2; i++)
+    {
+        //copy UV
+        memcpy(tmpUV + k * tailor_width,
+               srcframe + (normal_width * normal_height) + i * normal_width + startX, tailor_width);
+        k++; //current height num
+    }
+    memcpy(dstframe, tmpY, tailor_width * tailor_height);
+    memcpy(dstframe + tailor_width * tailor_height, tmpUV,
+           tailor_width * tailor_height / 2);
+    free(tmpY);
+    free(tmpUV);
+    return 0;
+}
+/*When saving a file,sp420 will be denoted by p420 and sp422 will be denoted by p422 in the name of the file */
+static int sample_yuv_dump(VIDEO_FRAME_S *pVBuf, int sfd)
+{
+    unsigned int w, h;
+    char *pVBufVirt_Y;
+    char *pVBufVirt_C;
+    char *pMemContent_Y;
+    char *pMemContent_U;
+    char *pMemContent_V;
+    // static unsigned char TmpBuff[MAX_FRM_WIDTH]; //If this value is too small and the image is big, this memory may not be enough
+
+    HI_U32 phy_addr;
+    PIXEL_FORMAT_E enPixelFormat = pVBuf->enPixelFormat;
+    HI_U32 u32UvHeight = 0; //When the storage format is a planar format, this variable is used to keep the height of the UV component
+
+    if (PIXEL_FORMAT_YUV_SEMIPLANAR_420 == enPixelFormat)
+    {
+        u32Size = (pVBuf->u32Stride[0]) * (pVBuf->u32Height) * 3 / 2;
+        u32UvHeight = pVBuf->u32Height / 2;
+    }
+    else if (PIXEL_FORMAT_YUV_SEMIPLANAR_422 == enPixelFormat)
+    {
+        u32Size = (pVBuf->u32Stride[0]) * (pVBuf->u32Height) * 2;
+        u32UvHeight = pVBuf->u32Height;
+    }
+    else if (PIXEL_FORMAT_YUV_400 == enPixelFormat)
+    {
+        u32Size = (pVBuf->u32Stride[0]) * (pVBuf->u32Height);
+        u32UvHeight = pVBuf->u32Height;
+    }
+
+    phy_addr = pVBuf->u32PhyAddr[0];
+
+    //printf("phy_addr:%x, size:%d\n", phy_addr, size);
+    pUserPageAddr[0] = (HI_CHAR *)HI_MPI_SYS_Mmap(phy_addr, u32Size);
+    if (HI_NULL == pUserPageAddr[0])
+    {
+        return -1;
+    }
+    //printf("stride: %d,%d\n",pVBuf->u32Stride[0],pVBuf->u32Stride[1] );
+
+    struct timeval start;
+    struct timeval end;
+    unsigned long timer;
+    /* 程序开始之前计时start */
+    gettimeofday(&start, NULL);
+
+    pVBufVirt_Y = pUserPageAddr[0];
+    pVBufVirt_C = pVBufVirt_Y + (pVBuf->u32Stride[0]) * (pVBuf->u32Height);
+
+    int Set_H = 1000; /*設定高*/
+    int Set_W = 1000; /*設定寬*/
+
+    int Do_H = pVBuf->u32Height; /*設定高*/
+    int Do_W = pVBuf->u32Width;  /*設定寬*/
+
+    int startH = 0;
+    int startW = 0;
+
+    if (Do_H > Set_H)
+    {
+        startH = (Do_H - Set_H) / 2;
+        Do_H = Set_H;
+    }
+    if (Do_W > Set_W)
+    {
+        startW = (Do_W - Set_W) / 2;
+        Do_W = Set_W;
+    }
+    printf("run here>>>>>>>>>start w =%d H=%d>>>>>>>>>>>>>>>>>>>.\n", startW, startH);
+    printf("run here>>>>>>>>>DO w =%d H=%d>>>>>>>>>>>>>>>>>>>.\n", Do_W, Do_H);
+    int y_size = Do_W * Do_H;
+    int yuv_size = y_size * 3 / 2;
+
+    unsigned char *yuvbuf;
+    if ((yuvbuf = (unsigned char *)malloc(yuv_size + 1)) != NULL)
+    {
+        memset(yuvbuf, 0, yuv_size + 1);
+    }
+    else
+    {
+        printf("run here>>>>>>>>> malloc Fail>>>>>>>>>>>>>>>>>>>.\n");
+    }
+
+  int idy = 0;
+  int idu = 0;
+  int idv = 0;
+
+  unsigned char* y_tmp = yuvbuf;
+  unsigned char* u_tmp = yuvbuf + y_size;
+  unsigned char* v_tmp = yuvbuf + y_size * 5 / 4;
+
+
+  for (h = startH; h <( Do_H +startH); h++) 
+    {
+      pMemContent_Y = pVBufVirt_Y + h * pVBuf->u32Stride[0];
+        for (w = startW; w < (Do_W+startW); w++) {
+        y_tmp[idy++] = *(pMemContent_Y+w);
+            //pMemContent_Y++;
+        }
+    }
+
+  for (h =  (startH/2); h <  ( (Do_H+startH)/2); h++) {
+
+        pMemContent_U = pVBufVirt_C + h * pVBuf->u32Stride[1];
+        pMemContent_V = pVBufVirt_C + h * pVBuf->u32Stride[1];
+        pMemContent_U += 1;            
+        for (w = (startW/2); w < ((Do_W+startW)/2) ; w++){
+            u_tmp[idu++] = *(pMemContent_U+(2*w));
+            v_tmp[idv++] = *(pMemContent_V+(2*w));
+        }
+    }
+
+    printf("run here>>>>>>>>> idy %d>>>>>>>>>>>>>>>>>>>.\n", idy);
+    printf("run here>>>>>>>>> idu %d>>>>>>>>>>>>>>>>>>>.\n", idu);
+    printf("run here>>>>>>>>> idv %d>>>>>>>>>>>>>>>>>>>.\n", idv);
+    // fwrite(pMemContent, pVBuf->u32Width, 1, pfd);
+
+    printf("!!!!!!!!!!!yuv to jpeg success!!!!!!!!!\n");
+    unsigned char *jpeg_buf = NULL;
+    unsigned long jpeg_size = 0;
+    unsigned char *picture = (unsigned char *)malloc(yuv_size + 1);
+    if (picture == NULL)
+    {
+        printf("lpr_jpeg_save malloc failed\n");
+        return -1;
+    }
+
+    //yuv420sp_to_yuv420p(yuvbuf, picture, pVBuf->u32Width, pVBuf->u32Height);
+    tyuv2jpeg(yuvbuf, yuv_size, Do_W, Do_H, TJSAMP_420,
+              &jpeg_buf, &jpeg_size, 96); //50:quality
+
+    gettimeofday(&end, NULL);
+    /* 统计程序段运行时间(unit is usec)*/
+    timer = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
+    printf("\n>>>>>The running time of this program is: %ld us\n", timer);
+
+    //  FILE * fp_jpg = fopen("1_yuv_to_jpeg_test.jpg", "wb");
+    //  fwrite(jpeg_buf, jpeg_size, 1, fp_jpg);
+    //  fflush(fp_jpg);
+    //  fclose(fp_jpg);
+    //  //free(jpeg_buf);
+    // 将图片发送给客户端
+    //发送缓冲区
+    //int nSendBuf=32*1024;//设置为32K
+    //setsockopt(s,SOL_SOCKET,SO_SNDBUF,(const char*)&nSendBuf,sizeof(int));
+
+    int needSend = jpeg_size;
+    int pos = 0;
+    int len = 0;
+    while (pos < needSend)
+    {
+        len = send(sfd, jpeg_buf + pos, 1024, 0);
+        if (len <= 0)
+        {
+            perror("ERRPR");
+            break;
+        }
+        pos += len;
+    }
+    while (1)
+    {
+        sleep(1); //延迟  //睡眠函数延迟，这个必须有，因为是非阻塞
+        break;
+    }
+    send(sfd, "OK", 2, 0);
+    printf("jpeg_size:%d Transfer Successful!\n", jpeg_size);
+
+    /* 统计程序段运行时间(unit is usec)*/
+    timer = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec - start.tv_usec;
+    printf("\n>>>>>The running time of this program is: %ld us\n", timer);
+
+    if (yuvbuf != NULL)
+    {
+        free(yuvbuf);
+    }
+    free(jpeg_buf);
+    printf("!!!!!!!!!!!yuv to jpeg free res!!!!!!!!!\n");
+    HI_MPI_SYS_Munmap(pUserPageAddr[0], u32Size);
+    pUserPageAddr[0] = HI_NULL;
+    return 0;
+}
+
+static HI_S32 VPSS_Restore(VPSS_GRP VpssGrp, VPSS_CHN VpssChn)
+{
+
+    if (VB_INVALID_POOLID != stFrame.u32PoolId)
+    {
+        if (HI_MPI_VPSS_ReleaseChnFrame(VpssGrp, VpssChn, &stFrame))
+        {
+            printf("HI_MPI_VPSS_ReleaseChnFrame failed!");
+        }
+
+        stFrame.u32PoolId = VB_INVALID_POOLID;
+    }
+    if (-1 != hHandle)
+    {
+        HI_MPI_VGS_CancelJob(hHandle);
+        hHandle = -1;
+    }
+    if (HI_NULL != stMem.pVirAddr)
+    {
+        HI_MPI_SYS_Munmap((HI_VOID *)stMem.pVirAddr, u32BlkSize);
+        stMem.u32PhyAddr = HI_NULL;
+    }
+    if (VB_INVALID_POOLID != stMem.hPool)
+    {
+        HI_MPI_VB_ReleaseBlock(stMem.hBlock);
+        stMem.hPool = VB_INVALID_POOLID;
+    }
+
+    if (VB_INVALID_POOLID != hPool)
+    {
+        HI_MPI_VB_DestroyPool(hPool);
+        hPool = VB_INVALID_POOLID;
+    }
+
+    if (HI_NULL != pUserPageAddr[0])
+    {
+        HI_MPI_SYS_Munmap(pUserPageAddr[0], u32Size);
+        pUserPageAddr[0] = HI_NULL;
+    }
+
+    // if (pfd)
+    // {
+    //     fclose(pfd);
+    //     pfd = HI_NULL;
+    // }
+
+    if (u32VpssDepthFlag)
+    {
+        if (HI_MPI_VPSS_SetDepth(VpssGrp, VpssChn, u32OrigDepth) != HI_SUCCESS)
+        {
+            printf("set depth error!!!\n");
+        }
+        u32VpssDepthFlag = 0;
+    }
+
+    return HI_SUCCESS;
+}
+int takePhotoOfOnline(int sfd)
+{
+    HI_CHAR szPixFrm[10];
+    HI_U32 u32Cnt = u32FrameCnt;
+    HI_U32 u32Depth = 2;
+    HI_S32 s32MilliSec = 200;
+    HI_S32 s32Times = 10;
+    HI_BOOL bSendToVgs = HI_FALSE;
+    HI_S32 s32Ret;
+    HI_S32 s32CapCnt = 0;
+    if (HI_MPI_VPSS_GetDepth(Grp, Chn, &u32OrigDepth) != HI_SUCCESS)
+    {
+        printf("get depth error!!!\n");
+        return -1;
+    }
+
+    if (HI_MPI_VPSS_SetDepth(Grp, Chn, u32Depth) != HI_SUCCESS)
+    {
+        printf("set depth error!!!\n");
+        VPSS_Restore(Grp, Chn);
+        return -1;
+    }
+    u32VpssDepthFlag = 1;
+
+    memset(&stFrame, 0, sizeof(stFrame));
+    stFrame.u32PoolId = VB_INVALID_POOLID;
+    while (HI_MPI_VPSS_GetChnFrame(Grp, Chn, &stFrame, s32MilliSec) != HI_SUCCESS)
+    {
+        s32Times--;
+        if (0 >= s32Times)
+        {
+            printf("get frame error for 10 times,now exit !!!\n");
+            VPSS_Restore(Grp, Chn);
+            return -1;
+        }
+        usleep(40000);
+    }
+
+    switch (stFrame.stVFrame.enPixelFormat)
+    {
+    case PIXEL_FORMAT_YUV_SEMIPLANAR_420:
+        snprintf(szPixFrm, 10, "P420");
+        break;
+    case PIXEL_FORMAT_YUV_SEMIPLANAR_422:
+        snprintf(szPixFrm, 10, "P422");
+        break;
+    case PIXEL_FORMAT_YUV_400:
+        snprintf(szPixFrm, 10, "P400");
+        break;
+    default:
+        snprintf(szPixFrm, 10, "--");
+        break;
+    }
+
+    if (HI_MPI_VPSS_ReleaseChnFrame(Grp, Chn, &stFrame) != HI_SUCCESS)
+    {
+        printf("HI_MPI_VPSS_ReleaseChnFrame failed! \n");
+        VPSS_Restore(Grp, Chn);
+        return -1;
+    }
+    stFrame.u32PoolId = VB_INVALID_POOLID;
+    /* get frame first */
+    while (u32Cnt--)
+    {
+        if (HI_MPI_VPSS_GetChnFrame(Grp, Chn, &astFrame[s32CapCnt],
+                                    s32MilliSec) != HI_SUCCESS)
+        {
+            printf("Get frame fail, real capture frame cnt: %d.\n", s32CapCnt);
+            break;
+        }
+        s32CapCnt++;
+    }
+
+    printf("real capture frame cnt: %d\n", s32CapCnt);
+
+    int j = 0;
+    /* store yuv frames */
+    for (j = 0; j < s32CapCnt; j++)
+    {
+
+        if (((astFrame[j].stVFrame.enCompressMode > 0) || (astFrame[j].stVFrame.enVideoFormat > 0)))
+        {
+            bSendToVgs = HI_TRUE;
+        }
+        else
+        {
+            bSendToVgs = HI_FALSE;
+        }
+
+        if (bSendToVgs)
+        {
+            printf("==============================================\n");
+        }
+        else
+        {
+            sample_yuv_dump(&(astFrame[j].stVFrame), sfd);
+        }
+
+        /* release frame after using */
+        s32Ret = HI_MPI_VPSS_ReleaseChnFrame(Grp, Chn, &astFrame[j]);
+        if (s32Ret != HI_SUCCESS)
+        {
+            printf("HI_MPI_VPSS_ReleaseChnFrame failed\n");
+            VPSS_Restore(Grp, Chn);
+            return -1;
+        }
+        astFrame[j].u32PoolId = VB_INVALID_POOLID;
+    }
+    VPSS_Restore(Grp, Chn);
+    return 0;
+}
+
+int takePhotoOfOffline()
+{
+    return 0;
+}

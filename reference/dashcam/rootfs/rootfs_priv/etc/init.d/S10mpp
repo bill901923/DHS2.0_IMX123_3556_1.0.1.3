@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# mount appfs
+#sleep 0.1
+#mount -t jffs2 /dev/mtdblock8 /app
+#mount -t yaffs /dev/mtdblock8 /app
+#ubiattach /dev/ubi_ctrl -m 7
+#mount -t ubifs ubi1:ubifs /app
+#mount -t ext4 /dev/mmcblk0p8 /app
+
+#start application
+cd /app
+./bootapp

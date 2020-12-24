@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see Documentation/kbuild/kconfig-language.txt.
+#
+#comment "Device Configuration"
+
+menuconfig AHD
+	bool "AHD support"
+
+if AHD
+
+config AHD_N3
+		bool "Support N3"
+		help
+			whether the hal supports N3.
+config AHD_NVP6324
+		bool "Support NVP6324"
+		help
+			whether the hal supports NVP6324.
+endif
+

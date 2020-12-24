@@ -1,0 +1,20 @@
+#
+# For a description of the syntax of this configuration file,
+# see Documentation/kbuild/kconfig-language.txt.
+#
+#comment "Device Configuration"
+
+menuconfig Button
+	bool "Button support"
+
+if Button
+	choice
+		prompt "Button Type"
+		 config Button_Even
+			bool "Button_Even"
+		if ADC	
+	    config Button_ADC
+			bool "Button_ADC"
+	    endif
+	endchoice
+endif

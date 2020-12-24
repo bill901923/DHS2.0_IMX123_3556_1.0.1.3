@@ -1,0 +1,18 @@
+#
+# For a description of the syntax of this configuration file,
+# see Documentation/kbuild/kconfig-language.txt.
+#
+#comment "Device Configuration"
+
+menuconfig WIFI
+	bool "WIFI support"
+
+if WIFI
+	choice
+		prompt "WIFI Type"
+		config WIFI_RTL8189
+			bool "rtl8189"
+			depends on (HI3559V200 || HI3556V200 || HI3518EV300 || HI3519AV100)
+	endchoice
+endif
+

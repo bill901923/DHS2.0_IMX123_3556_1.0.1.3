@@ -1,0 +1,1 @@
+jsimd_arm_neon.lo: jsimd_arm_neon.S

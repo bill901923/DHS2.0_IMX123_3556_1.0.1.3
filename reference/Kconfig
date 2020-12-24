@@ -1,0 +1,58 @@
+#
+# For a description of the syntax of this configuration file,
+# see build/scripts/Documentation/kbuild/kconfig-language.txt.
+#
+
+source reference/hal/Kconfig
+source reference/common/Kconfig
+
+menu "Scene Configuration"
+config SCENEAUTO_SUPPORT
+	bool "Sceneauto support"
+endmenu
+
+menu "Media Configuration"
+	config LDC_SUPPORT
+		bool "LDC support"
+		help
+			Lens Distortion Correction.
+endmenu
+
+menu "UI Configuration"
+	choice
+		prompt "LCD UI Source Adapt Type"
+		default LCD_UISRC_ADAPT_MANUAL
+		config LCD_UISRC_ADAPT_AUTO
+			bool "auto"
+		config LCD_UISRC_ADAPT_MANUAL
+			bool "manual"
+	endchoice
+	config LCD_UISRC_BASE_WIDTH
+	    string "LCD UI source base width"
+	    depends on LCD_UISRC_ADAPT_AUTO
+		help
+			base width of the UI resource file when the LCD UI resource file adaptation type is Automatic.
+    config LCD_UISRC_BASE_HEIGHT
+	    string "LCD UI source base height"
+	    depends on LCD_UISRC_ADAPT_AUTO
+		help
+			base height of the UI resource file when the LCD UI resource file adaptation type is Automatic.
+    config LCD_UISRC_DEST_WIDTH
+	    string "LCD UI source dest width"
+	    depends on LCD_UISRC_ADAPT_AUTO
+		help
+			destination width of the UI resource file when the LCD UI resource file adaptation type is Automatic.
+    config LCD_UISRC_DEST_HEIGHT
+	    string "LCD UI source dest height"
+	    depends on LCD_UISRC_ADAPT_AUTO
+		help
+			destination height of the UI resource file when the LCD UI resource file adaptation type is Automatic.
+
+endmenu
+
+menu "PARAM Configuration"
+config PARAM_DIR_SUFFIX
+	string "PARAM DIR SUFFIX"
+	help
+		suffix of a parameter folder, which is used to distinguish parameter directories of different versions.
+endmenu
